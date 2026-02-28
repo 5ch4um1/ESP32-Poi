@@ -43,6 +43,7 @@ volatile uint16_t buf_pos = 0;
 uint8_t read_buf[1024]; // The physical buffer
 //queue
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 // --- Hardware ---
 #define LED_GPIO            GPIO_NUM_6
@@ -262,7 +263,7 @@ void custom_animation(led_strip_handle_t strip, uint8_t brightness);
 #define MAX_BLE_PAYLOAD (TOTAL_DATA_LEN + 2)
 
 
-volatile int frames_available = 0;
+static SemaphoreHandle_t frames_sem = NULL;
 static int current_frame_idx = 0;
 static bool is_writing_to_buffer = false;
 
@@ -609,13 +610,12 @@ if (current_mode == MODE_STREAMING) {
     // Wait for the timer to tell us it's time for the next frame
     // We wait up to 100ms, but the timer will usually wake us much faster
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) > 0) {
-        if (frames_available > 0) {
+        if (xSemaphoreTake(frames_sem, 0) == pdTRUE) {
             render_frame(ring_buf->frames[ring_buf->tail]);
             
             // Update pointers
             ring_buf->tail = (ring_buf->tail + 1) % MAX_FRAMES;
             ring_buf->total_played++;
-            frames_available--;
         }
     }
     continue; 
@@ -771,7 +771,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg) {
         led_task_running = true;
         esp_timer_stop(pov_timer);
         current_mode = MODE_PATTERN;
-        frames_available = 0;
+        while(xSemaphoreTake(frames_sem, 0));
         start_advertising();
 
         return 0;
@@ -1097,7 +1097,7 @@ static int gatt_svr_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
 					// Reset buffer pointers
 					ring_buf->head = 0;
 					ring_buf->tail = 0;
-					frames_available = 0;
+					while(xSemaphoreTake(frames_sem, 0));
 
 					// Change mode - This tells the big task below to stop reading files
 					current_mode = MODE_STREAMING; 
@@ -1117,7 +1117,7 @@ static int gatt_svr_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
                 current_mode = MODE_PATTERN;
                 
                 // Clear playback state
-                frames_available = 0;
+                while(xSemaphoreTake(frames_sem, 0));
                 current_frame_idx = 0;
 
                 // Clear the physical LEDs so they don't stay "stuck" on
@@ -1150,11 +1150,14 @@ static int gatt_svr_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
 						
 						// Safety check to prevent buffer overflow
 						if (src_offset + FRAME_SIZE <= actual_len) {
-							memcpy(ring_buf->frames[ring_buf->head], &temp_flat_buf[src_offset], FRAME_SIZE);
-							ring_buf->head = (ring_buf->head + 1) % MAX_FRAMES;
-							
-							if (frames_available < MAX_FRAMES) {
-								frames_available++;
+							uint16_t next_head = (ring_buf->head + 1) % MAX_FRAMES;
+							if (next_head != ring_buf->tail) {
+								memcpy(ring_buf->frames[ring_buf->head], &temp_flat_buf[src_offset], FRAME_SIZE);
+								ring_buf->head = next_head;
+								xSemaphoreGive(frames_sem);
+							} else {
+								ESP_LOGW("BLE", "Stream buffer full, dropping frame");
+								break; 
 							}
 						}
 					}
@@ -1531,6 +1534,12 @@ ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, adcchan, &config));
 if (ring_buf == NULL) {
     ESP_LOGE("MEM", "Failed to allocate DMA ring buffer!");
 }
+
+    // Create counting semaphore for stream frames
+    frames_sem = xSemaphoreCreateCounting(MAX_FRAMES, 0);
+    if (frames_sem == NULL) {
+        ESP_LOGE("MEM", "Failed to create frames semaphore!");
+    }
 
     // 7. Start the POV Rendering Task
     // We give it a priority of 5 (Higher than the idle task, but balanced for BLE)
