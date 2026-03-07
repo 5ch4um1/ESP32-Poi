@@ -1,6 +1,6 @@
 # ESP32-Poi
 
-ESP32-C3 firmware compatible with [Open Pixel Poi](https://openpixelpoi.com) boards, designed for Poi and other flow props.
+ESP32-C3 firmware compatible with [Open Pixel Poi](https://openpixelpoi.com) boards, designed for Poi and other flow props, compatible only with WS2812/13 LEDs (aka Neopixel) for now. If your Poi use another type of LED, you would need to add the functionality for these yourself.
 
 This firmware provides high-performance POV (Persistence of Vision) rendering, support for multiple pattern banks/slots, procedural animations, and a low-latency BLE streaming mode for real-time control.
 
