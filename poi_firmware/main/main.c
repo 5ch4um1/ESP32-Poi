@@ -121,10 +121,56 @@ bool g_shuffle_slots_only = false;
 uint32_t g_shuffle_duration_ms = 5000; // Default 5 seconds
 uint32_t g_last_shuffle_tick = 0;
 
-//Button
+// --- Button Logic State Machine ---
+typedef enum {
+    BS_INITIAL,
+    BS_CLICK_DOWN,
+    BS_CLICK_HOLD,
+    BS_CLICK_HOLD_LONG,
+    BS_CLICK_UP,
+    BS_CLICK2_DOWN,
+    BS_CLICK2_HOLD,
+    BS_CLICK2_UP,
+    BS_CLICK3_DOWN,
+    BS_CLICK3_HOLD,
+    BS_CLICK3_UP,
+    BS_CLICK4_DOWN,
+    BS_CLICK4_HOLD,
+    BS_CLICK4_UP,
+    BS_CLICK5_DOWN,
+    BS_CLICK5_HOLD,
+    BS_CLICK5_UP
+} button_state_t;
+
+typedef enum {
+    DS_PATTERN,
+    DS_WAITING,
+    DS_WAITING2,
+    DS_WAITING3,
+    DS_WAITING4,
+    DS_WAITING5,
+    DS_VOLTAGE,
+    DS_VOLTAGE2,
+    DS_BANK,
+    DS_BRIGHTNESS,
+    DS_SPEED,
+    DS_SHUTDOWN,
+    DS_PATTERN_ALL,
+    DS_PATTERN_ALL_ALL
+} display_state_t;
+
+// --- Button Globals ---
 volatile bool g_btn_is_down = false;
 volatile TickType_t g_btn_transition_tick = 0;
-volatile TickType_t g_last_press_tick = 0; // Added this
+volatile TickType_t g_last_press_tick = 0; 
+
+static button_state_t g_button_state = BS_INITIAL;
+static display_state_t g_display_state = DS_PATTERN;
+static uint32_t g_down_time = 0;
+static uint32_t g_shut_down_at = 0;
+static uint32_t g_display_state_last_updated = 0;
+
+#define millis() (pdTICKS_TO_MS(xTaskGetTickCount()))
 
 static void IRAM_ATTR button_isr_handler(void* arg) {
     bool current_level = gpio_get_level(BUTTON_GPIO);
@@ -510,79 +556,232 @@ void pov_render_task(void *pvParameters) {
     
 
     while (1) {
-        //button
-        // Static variables to persist between loop iterations
-        static int g_short_press_count = 0;
-        static bool g_in_menu_mode = false;
-        static TickType_t g_last_release_tick = 0;
+        // --- BUTTON STATE MACHINE ---
+        uint32_t now = millis();
+        bool pressed = g_btn_is_down;
 
-        TickType_t current_tick = xTaskGetTickCount();
-
-        // 1. Detect Long Press to enter "Menu Mode" or Deep Sleep
-        if (g_btn_is_down) {
-            TickType_t press_duration = current_tick - g_btn_transition_tick;
-
-            // Deep Sleep Long Press (longer than 3 seconds)
-            if (press_duration > pdMS_TO_TICKS(3000)) {
-                ESP_LOGI("BTN", "Deep Sleep initiated by long press!");
-                // Turn off LEDs before deep sleep
-                led_strip_clear(led_strip);
-                led_strip_refresh(led_strip);
-                // Turn off the voltage regulator
-                gpio_set_level(REGULATOR_GPIO, 0);
-
-                // --- Wait for button release before enabling deep sleep ---
-                ESP_LOGI("BTN", "Waiting for button release before deep sleep...");
-                while (g_btn_is_down) {
-                    vTaskDelay(pdMS_TO_TICKS(50)); // Check every 50ms
-                }
-                vTaskDelay(pdMS_TO_TICKS(100)); // Debounce delay after release
-
-                // Configure button for wake-up with GPIO
-                esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW);
-                esp_deep_sleep_start();
-            }
-
-            // 1. Detect Long Press to enter "Menu Mode"
-            if (!g_in_menu_mode && (current_tick - g_btn_transition_tick) > pdMS_TO_TICKS(1000)) {
-                g_in_menu_mode = true;
-                g_short_press_count = 0;
-                ESP_LOGI("BTN", "Menu Mode Active");
-                run_flash_animation(0xFF0000);
-                vTaskDelay(pdMS_TO_TICKS(100));
-                run_flash_animation(0x000000);
-                vTaskDelay(pdMS_TO_TICKS(100));
+        if (pressed) {
+            if (g_button_state == BS_INITIAL) {
+                g_down_time = now;
+                g_button_state = BS_CLICK_DOWN;
+                g_display_state = DS_WAITING;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK_DOWN");
+            } else if (g_button_state == BS_CLICK_UP) {
+                g_down_time = now;
+                g_button_state = BS_CLICK2_DOWN;
+                g_display_state = DS_WAITING2;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK2_DOWN");
+            } else if (g_button_state == BS_CLICK2_UP) {
+                g_down_time = now;
+                g_button_state = BS_CLICK3_DOWN;
+                g_display_state = DS_WAITING3;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK3_DOWN");
+            } else if (g_button_state == BS_CLICK3_UP) {
+                g_down_time = now;
+                g_button_state = BS_CLICK4_DOWN;
+                g_display_state = DS_WAITING4;
+                g_display_state_last_updated = now;
+            } else if (g_button_state == BS_CLICK4_UP) {
+                g_down_time = now;
+                g_button_state = BS_CLICK5_DOWN;
+                g_display_state = DS_WAITING5;
+                g_display_state_last_updated = now;
+            } else if (g_button_state == BS_CLICK_DOWN && (now - g_down_time) >= 500) {
+                g_button_state = BS_CLICK_HOLD;
+                g_display_state = DS_VOLTAGE;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK_HOLD");
+            } else if (g_button_state == BS_CLICK_HOLD && (now - g_down_time) >= 2000) {
+                g_button_state = BS_CLICK_HOLD_LONG;
+                g_display_state = DS_SHUTDOWN;
+                g_display_state_last_updated = now;
+                g_shut_down_at = now;
+                ESP_LOGI("BTN", "CLICK_HOLD_LONG (SHUTDOWN)");
+            } else if (g_button_state == BS_CLICK2_DOWN && (now - g_down_time) >= 500) {
+                g_button_state = BS_CLICK2_HOLD;
+                g_display_state = DS_BANK;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK2_HOLD (BANK)");
+            } else if (g_button_state == BS_CLICK3_DOWN && (now - g_down_time) >= 500) {
+                g_button_state = BS_CLICK3_HOLD;
+                g_display_state = DS_BRIGHTNESS;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK3_HOLD (BRIGHTNESS)");
+            } else if (g_button_state == BS_CLICK4_DOWN && (now - g_down_time) >= 500) {
+                g_button_state = BS_CLICK4_HOLD;
+                g_display_state = DS_SPEED;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "CLICK4_HOLD (SPEED)");
+            } else if (g_button_state == BS_CLICK5_DOWN && (now - g_down_time) >= 500) {
+                g_button_state = BS_CLICK5_HOLD;
+                g_display_state = DS_PATTERN;
+                g_display_state_last_updated = now;
             }
         } else {
-            // 2. Detect Short Press on Release
-            if (g_btn_transition_tick > g_last_release_tick) {
-                TickType_t duration = g_btn_transition_tick - g_last_press_tick;
-                // If it was a quick tap (50ms to 500ms)
-                if (duration < pdMS_TO_TICKS(500) && duration > pdMS_TO_TICKS(50)) {
-                    g_short_press_count++;
-                    ESP_LOGI("BTN", "Short Press #%d", g_short_press_count);
+            // Release logic
+            if (g_button_state == BS_CLICK_DOWN) {
+                g_button_state = BS_CLICK_UP;
+                ESP_LOGI("BTN", "CLICK_UP");
+            } else if (g_button_state == BS_CLICK2_DOWN) {
+                g_button_state = BS_CLICK2_UP;
+                ESP_LOGI("BTN", "CLICK2_UP");
+            } else if (g_button_state == BS_CLICK3_DOWN) {
+                g_button_state = BS_CLICK3_UP;
+            } else if (g_button_state == BS_CLICK4_DOWN) {
+                g_button_state = BS_CLICK4_UP;
+            } else if (g_button_state == BS_CLICK5_DOWN) {
+                g_button_state = BS_CLICK5_UP;
+            } else if (g_button_state == BS_CLICK_HOLD) {
+                g_button_state = BS_INITIAL;
+                g_display_state = DS_PATTERN;
+                g_display_state_last_updated = now;
+            } else if (g_button_state == BS_CLICK2_HOLD) {
+                int selection = ((now - g_down_time - 500) % 3500) / 500;
+                if (selection == 0) g_current_bank = 0;
+                else if (selection == 1) g_current_bank = 1;
+                else if (selection == 2) g_current_bank = 2;
+                else if (selection == 3) { g_shuffle_all_banks = true; g_shuffle_slots_only = false; }
+                else {
+                    g_current_bank = selection - 4;
+                    g_shuffle_slots_only = true;
+                    g_shuffle_all_banks = false;
                 }
-                g_last_release_tick = g_btn_transition_tick;
-            }
+                g_reloading_pattern = true;
+                g_button_state = BS_INITIAL;
+                g_display_state = DS_PATTERN;
+                ESP_LOGI("BTN", "BANK SELECTED: %d", g_current_bank);
+            } else if (g_button_state == BS_CLICK3_HOLD) {
+                uint32_t duration = now - g_down_time;
+                if (duration < 1000) g_brightness = g_brightness_presets[0];
+                else if (duration < 1500) g_brightness = g_brightness_presets[1];
+                else if (duration < 2000) g_brightness = g_brightness_presets[2];
+                else if (duration < 2500) g_brightness = g_brightness_presets[3];
+                else if (duration < 3000) g_brightness = g_brightness_presets[4];
+                else g_brightness = g_brightness_presets[5];
+                
+                g_button_state = BS_INITIAL;
+                g_display_state = DS_PATTERN;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "BRIGHTNESS SELECTED: %d", g_brightness);
+            } else if (g_button_state == BS_CLICK4_HOLD) {
+                uint32_t duration = now - g_down_time;
+                if (duration < 1000) g_selected_speed_index = 0;
+                else if (duration < 1500) g_selected_speed_index = 1;
+                else if (duration < 2000) g_selected_speed_index = 2;
+                else if (duration < 2500) g_selected_speed_index = 3;
+                else if (duration < 3000) g_selected_speed_index = 4;
+                else g_selected_speed_index = 5;
 
-            // 3. Action Trigger (1s after last release)
-            if (g_in_menu_mode && (current_tick - g_last_release_tick) > pdMS_TO_TICKS(1000)) {
-                if (g_short_press_count == 1) {
-                    run_flash_animation(0x00FF00); // Green for stream toggle
-                } else if (g_short_press_count == 2) {
-                    g_current_bank = (g_current_bank + 1) % 3;
-                    g_reloading_pattern = true;
-                    run_flash_animation(0x0000FF); // Blue for bank change
-                } else if (g_short_press_count == 3) {
-                    g_brightness = 100;
-                    run_flash_animation(0xFFFF00); // Yellow for reset
-                }
-                g_in_menu_mode = false;
-                g_short_press_count = 0;
+                g_button_state = BS_INITIAL;
+                g_display_state = DS_PATTERN;
+                g_display_state_last_updated = now;
+                ESP_LOGI("BTN", "SPEED SELECTED: %d", g_selected_speed_index);
+            } else if (g_button_state == BS_CLICK5_HOLD) {
+                g_button_state = BS_INITIAL;
             }
         }
 
-        //button end
+        // Multi-click timeouts
+        if (g_button_state == BS_CLICK_UP && (now - g_down_time) >= 500) {
+            g_current_slot = (g_current_slot + 1) % 5;
+            g_reloading_pattern = true;
+            g_display_state = DS_PATTERN;
+            g_button_state = BS_INITIAL;
+            ESP_LOGI("BTN", "SINGLE CLICK -> SLOT %d", g_current_slot);
+        } else if (g_button_state == BS_CLICK2_UP && (now - g_down_time) >= 500) {
+            g_button_state = BS_INITIAL;
+        } else if (g_button_state == BS_CLICK3_UP && (now - g_down_time) >= 500) {
+            g_button_state = BS_INITIAL;
+        } else if (g_button_state == BS_CLICK4_UP && (now - g_down_time) >= 500) {
+            g_button_state = BS_INITIAL;
+        } else if (g_button_state == BS_CLICK5_UP && (now - g_down_time) >= 500) {
+            g_display_state = DS_VOLTAGE2;
+            g_display_state_last_updated = now;
+            g_button_state = BS_INITIAL;
+        }
+
+        // Shutdown handling
+        if (g_shut_down_at != 0 && (now - g_shut_down_at) > 2000) {
+            led_strip_clear(led_strip);
+            led_strip_refresh(led_strip);
+            gpio_set_level(REGULATOR_GPIO, 0);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW);
+            esp_deep_sleep_start();
+        }
+
+        // --- DISPLAY FEEDBACK ---
+        if (g_display_state != DS_PATTERN) {
+            if (g_display_state == DS_VOLTAGE || g_display_state == DS_VOLTAGE2) {
+                float voltage = read_battery_voltage();
+                uint8_t r = 0, g = 0, b = 0;
+                if (voltage > 3.8f) g = 50;
+                else if (voltage > 3.6f) { r = 50; g = 50; }
+                else r = 50;
+                
+                int leds = (int)((voltage - 3.4f) * (MAX_LEDS / (4.2f - 3.4f)));
+                if (leds < 1) leds = 1;
+                if (leds > MAX_LEDS) leds = MAX_LEDS;
+                
+                led_strip_clear(led_strip);
+                for(int i=0; i<leds; i++) led_strip_set_pixel(led_strip, i, r, g, b);
+                led_strip_refresh(led_strip);
+            } else if (g_display_state == DS_BANK) {
+                int selection = ((now - g_down_time - 500) % 3500) / 500;
+                uint8_t r=0, g=0, b=0;
+                if (selection == 0) r = 50;
+                else if (selection == 1) g = 50;
+                else if (selection == 2) b = 50;
+                else if (selection == 3) { r=30; g=30; b=30; }
+                else { r=50; g=20; }
+                
+                led_strip_clear(led_strip);
+                for(int i=0; i<MAX_LEDS; i++) led_strip_set_pixel(led_strip, i, r, g, b);
+                led_strip_refresh(led_strip);
+            } else if (g_display_state == DS_BRIGHTNESS) {
+                uint32_t duration = now - g_down_time;
+                int level = 1;
+                if (duration > 3000) level = 6;
+                else if (duration > 2500) level = 5;
+                else if (duration > 2000) level = 4;
+                else if (duration > 1500) level = 3;
+                else if (duration > 1000) level = 2;
+                
+                led_strip_clear(led_strip);
+                for(int i=0; i<(level * MAX_LEDS / 6); i++) led_strip_set_pixel(led_strip, i, 40, 40, 0);
+                led_strip_refresh(led_strip);
+            } else if (g_display_state == DS_SPEED) {
+                uint32_t duration = now - g_down_time;
+                int level = 1;
+                if (duration > 3000) level = 6;
+                else if (duration > 2500) level = 5;
+                else if (duration > 2000) level = 4;
+                else if (duration > 1500) level = 3;
+                else if (duration > 1000) level = 2;
+                
+                led_strip_clear(led_strip);
+                for(int i=0; i<(level * MAX_LEDS / 6); i++) led_strip_set_pixel(led_strip, i, 0, 40, 40);
+                led_strip_refresh(led_strip);
+            } else if (g_display_state == DS_SHUTDOWN) {
+                run_flash_animation(0xFF0000);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                run_flash_animation(0x000000);
+            } else if (g_display_state >= DS_WAITING && g_display_state <= DS_WAITING5) {
+                int count = (int)g_display_state - (int)DS_WAITING + 1;
+                led_strip_clear(led_strip);
+                for(int i=0; i<count; i++) led_strip_set_pixel(led_strip, i, 20, 20, 20);
+                led_strip_refresh(led_strip);
+            }
+
+            if (now - g_display_state_last_updated > 2000 && !pressed) {
+                g_display_state = DS_PATTERN;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
 
         // --- B. STATE SWITCHING ---
 if ((xTaskGetTickCount() - g_last_battery_check) > pdMS_TO_TICKS(10000)) {    g_battery_voltage = read_battery_voltage();
