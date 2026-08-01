@@ -548,6 +548,43 @@ void render_frame(uint8_t *frame_ptr) {
     led_strip_refresh(led_strip);
 }
 
+// Enter light sleep and wake on the next button press (active-low button).
+// NOTE: esp_sleep_enable_gpio_wakeup() only enables the feature; each pin must
+// be armed first with gpio_wakeup_enable(gpio, level), otherwise nothing wakes
+// the chip.
+static void enter_light_sleep(void) {
+    // The shutdown path is entered while the button is still held (low).
+    // Wait for release so wake-on-press doesn't trigger immediately at entry.
+    while (gpio_get_level(BUTTON_GPIO) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    vTaskDelay(pdMS_TO_TICKS(50)); // debounce
+
+    ESP_LOGI(TAG, "Entering light sleep, waiting for button press...");
+    esp_err_t err = gpio_wakeup_enable(BUTTON_GPIO, GPIO_INTR_LOW_LEVEL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_wakeup_enable failed: %s", esp_err_to_name(err));
+    }
+    err = esp_sleep_enable_gpio_wakeup();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_sleep_enable_gpio_wakeup failed: %s", esp_err_to_name(err));
+    }
+    esp_light_sleep_start();
+
+    // Woke up: consume the wake-up press so it isn't interpreted as a click,
+    // and reset the shutdown state so the loop doesn't immediately re-sleep.
+    while (gpio_get_level(BUTTON_GPIO) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    vTaskDelay(pdMS_TO_TICKS(50)); // debounce
+    g_shut_down_at = 0;
+    g_button_state = BS_INITIAL;
+    g_display_state = DS_PATTERN;
+    g_display_state_last_updated = millis();
+    gpio_set_level(REGULATOR_GPIO, 1);
+    ESP_LOGI(TAG, "Woke up from light sleep");
+}
+
 // LEDS POV render task
 void pov_render_task(void *pvParameters) {
     // 1. Buffers: Use 'static' to keep them off the stack
@@ -709,8 +746,7 @@ void pov_render_task(void *pvParameters) {
             led_strip_refresh(led_strip);
             gpio_set_level(REGULATOR_GPIO, 0);
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW);
-            esp_deep_sleep_start();
+            enter_light_sleep();
         }
 
         // --- DISPLAY FEEDBACK ---
@@ -799,8 +835,7 @@ if ((xTaskGetTickCount() - g_last_battery_check) > pdMS_TO_TICKS(10000)) {    g_
         led_task_running = false; // Stop normal patterns
         show_sos_signal();
         gpio_set_level(REGULATOR_GPIO, 0);
-		esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW);
-		esp_deep_sleep_start();	     
+        enter_light_sleep();
     } 
     g_last_battery_check = xTaskGetTickCount();
 } 
@@ -1627,7 +1662,7 @@ void app_main(void) {
     gpio_set_direction(REGULATOR_GPIO, GPIO_MODE_OUTPUT);
 
     // Check if it's a deep sleep wakeup
-    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_causes();
     if (wakeup_cause == ESP_SLEEP_WAKEUP_GPIO) {
         uint64_t wakeup_gpio_mask = esp_sleep_get_gpio_wakeup_status();
         if (wakeup_gpio_mask & (1ULL << BUTTON_GPIO)) {
