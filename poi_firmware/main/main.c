@@ -571,12 +571,26 @@ static void enter_light_sleep(void) {
     }
     esp_light_sleep_start();
 
-    // Woke up: consume the wake-up press so it isn't interpreted as a click,
-    // and reset the shutdown state so the loop doesn't immediately re-sleep.
+    // Woke up. gpio_wakeup_enable() silently changed the pin's interrupt type
+    // to GPIO_INTR_LOW_LEVEL, which breaks the ANYEDGE button ISR (no interrupt
+    // on release), so g_btn_is_down would stay stuck true and the state machine
+    // would immediately run the shutdown sequence again. Wakeup sources are not
+    // disabled after wakeup (see sleep_modes docs), so restore normal operation.
+    gpio_config_t wake_btn = {
+        .pin_bit_mask = (1ULL << BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
+    };
+    gpio_config(&wake_btn);
+
+    // Consume the wake-up press so it isn't interpreted as a click, and reset
+    // the shutdown state so the loop doesn't immediately re-sleep.
     while (gpio_get_level(BUTTON_GPIO) == 0) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     vTaskDelay(pdMS_TO_TICKS(50)); // debounce
+    g_btn_is_down = false;
     g_shut_down_at = 0;
     g_button_state = BS_INITIAL;
     g_display_state = DS_PATTERN;
@@ -802,7 +816,7 @@ void pov_render_task(void *pvParameters) {
                 for(int i=0; i<(level * MAX_LEDS / 6); i++) led_strip_set_pixel(led_strip, i, 0, 40, 40);
                 led_strip_refresh(led_strip);
             } else if (g_display_state == DS_SHUTDOWN) {
-                run_flash_animation(0xFF0000);
+                run_flash_animation(0x440000);
                 vTaskDelay(pdMS_TO_TICKS(50));
                 run_flash_animation(0x000000);
             } else if (g_display_state >= DS_WAITING && g_display_state <= DS_WAITING5) {
