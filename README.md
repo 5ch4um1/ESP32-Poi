@@ -7,7 +7,7 @@ This firmware provides high-performance POV (Persistence of Vision) rendering, s
 ## Getting Started
 
 ### Prerequisites
-* **ESP-IDF v5.5.1**: This project is tested and optimized for the latest ESP-IDF.
+* **ESP-IDF v6.0**: This project is tested and optimized for the latest ESP-IDF.
 * **Hardware**: ESP32-C3 based Open Pixel Poi hardware.
 
 ### Build & Flash
