@@ -48,7 +48,7 @@ uint8_t read_buf[1024]; // The physical buffer
 // --- Hardware ---
 #define LED_GPIO            GPIO_NUM_6
 #define BUTTON_GPIO         GPIO_NUM_3
-#define REGULATOR_GPIO      GPIO_NUM_7
+#define REGULATOR_GPIO      GPIO_NUM_20
 #define MAX_LEDS            20
 // --- better calibrate the voltage readings individually for each poi,1: check the voltage reading in the web app, 2: measure with a multimeter
 // then compare the values and adjust the scaling factor as needed. --- 
